@@ -19,14 +19,29 @@
             @endif
         </header>
 
-        @if ($document['hasFields'])
-            <div class="space-y-6">
-                @foreach ($document['sections'] as $section)
-                    <x-form::section :section="$section" wire:key="section-{{ $loop->index }}" />
-                @endforeach
+        @if ($submitted)
+            <div role="status"
+                 class="rounded-xl border border-emerald-200 bg-emerald-50 p-8 text-center shadow-sm">
+                <h2 class="text-base font-semibold text-emerald-900">{{ $successMessage }}</h2>
+                <p class="mt-2 text-sm text-emerald-800">You can close this page now.</p>
             </div>
+        @elseif ($document['hasFields'])
+            @if ($submitError)
+                <div role="alert"
+                     class="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
+                    {{ $submitError }}
+                </div>
+            @endif
 
-            <x-form::submit :label="$document['submitLabel']" />
+            <form wire:submit="submit">
+                <div class="space-y-6">
+                    @foreach ($document['sections'] as $section)
+                        <x-form::section :section="$section" wire:key="section-{{ $loop->index }}" />
+                    @endforeach
+                </div>
+
+                <x-form::submit :label="$document['submitLabel']" />
+            </form>
         @else
             <div class="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center">
                 <p class="text-sm font-medium text-gray-900">This form has no questions yet</p>

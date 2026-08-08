@@ -187,7 +187,7 @@ it('renders a heading without an input', function () {
     expect($html)->toContain('name="full_name"');
 });
 
-it('advertises file limits without accepting uploads', function () {
+it('advertises the accepted file types and size limit', function () {
     $form = publishedForm([
         field('file', ['validation' => ['file_types' => ['pdf', 'PNG'], 'max_file_size_kb' => 2048]]),
     ]);
@@ -209,12 +209,13 @@ it('renders the configured rating scale', function () {
     expect($html)->not->toContain('value="4"');
 });
 
-it('renders the configured submit button text as a disabled control', function () {
+it('renders the configured submit button text on a live control', function () {
     $form = publishedForm([field('text')]);
 
     visit($form)
         ->assertSee('Send it')
-        ->assertSee('Submissions are not accepted yet');
+        ->assertSee('wire:submit="submit"', false)
+        ->assertSee('type="submit"', false);
 });
 
 it('escapes schema content authored by the form owner', function () {
