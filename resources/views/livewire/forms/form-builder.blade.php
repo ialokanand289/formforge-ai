@@ -8,7 +8,7 @@
 
         <x-builder::canvas :sections="$this->sections" />
 
-        <x-builder::properties-panel />
+        <x-builder::properties-panel :editor="$this->fieldEditor" :form="$fieldForm" />
     </div>
 
     <x-builder::json-preview :json="$this->schemaJson" />
