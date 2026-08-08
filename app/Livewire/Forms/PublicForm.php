@@ -5,43 +5,92 @@ namespace App\Livewire\Forms;
 use App\Enums\FieldType;
 use App\Models\Form;
 use App\Services\SchemaService;
+use App\Services\SubmissionService;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
+use Livewire\WithFileUploads;
+use Throwable;
 
 /**
- * Read-only renderer for a published form.
+ * Public renderer and submission endpoint for a published form.
  *
- * The component performs one database read per request, the token lookup, and
- * no writes of any kind. SchemaService::load() normalizes on read, which
- * repairs legacy rows; that repair is held in memory and never written back.
+ * The component binds input, validates it against rules derived from the schema
+ * in the database, and hands persistence to SubmissionService. It deliberately
+ * owns no persistence logic of its own.
  *
- * The token is the only public property, so the Livewire snapshot embedded in
- * the page stays small and carries no schema internals.
+ * The token is the only locked round tripping property, so the snapshot carries
+ * no schema internals. The form, its schema, and its version are re-read from
+ * the database on every request, which means nothing the browser sends can
+ * influence which form is written to or which version is recorded.
  */
 class PublicForm extends Component
 {
+    use WithFileUploads;
+
     #[Locked]
     public string $token = '';
 
     /**
-     * Per-request memo so mount and render share a single query.
+     * Visitor input. Unlocked by necessity, so never trusted: every key is
+     * matched back against the schema before validation and persistence.
+     *
+     * @var array<string, mixed>
+     */
+    public array $values = [];
+
+    /**
+     * Uploads keyed by field key. Slots stay null until a file arrives, because
+     * Livewire appends to an array target instead of replacing it.
+     *
+     * @var array<string, mixed>
+     */
+    public array $files = [];
+
+    #[Locked]
+    public bool $submitted = false;
+
+    #[Locked]
+    public string $successMessage = '';
+
+    #[Locked]
+    public ?string $submitError = null;
+
+    protected ?Form $form = null;
+
+    /**
+     * Normalized schema for the current request, or null when it is unusable.
+     *
+     * @var array<string, mixed>|null
+     */
+    protected ?array $schema = null;
+
+    protected bool $loaded = false;
+
+    /**
+     * Per-request memo of the presentation model.
      *
      * @var array<string, mixed>|null
      */
     protected ?array $resolved = null;
 
-    public function mount(string $token): void
+    public function mount(string $token, SubmissionService $submissions): void
     {
         $this->token = $token;
 
-        // Resolving here turns a missing or unpublished form into a 404 before
+        // Loading here turns a missing or unpublished form into a 404 before
         // the layout renders.
-        $this->resolve();
+        $this->load();
+
+        if ($this->schema !== null) {
+            $this->values = $submissions->defaultValues($this->schema);
+            $this->files = $submissions->defaultFiles($this->schema);
+        }
     }
 
     /**
@@ -54,13 +103,139 @@ class PublicForm extends Component
     }
 
     /**
-     * @return array<string, mixed>
+     * Check an upload the moment it lands.
+     *
+     * Livewire's temporary upload endpoint has a far higher ceiling than the
+     * per-field limits, so without this a visitor would wait for the whole file
+     * to upload and only learn it was too large when they pressed submit. Text
+     * inputs are left alone; validating them on every keystroke is noise.
      */
-    protected function resolve(): array
+    public function updated(string $property, SubmissionService $submissions): void
     {
-        if ($this->resolved !== null) {
-            return $this->resolved;
+        if (! str_starts_with($property, 'files.')) {
+            return;
         }
+
+        $this->load();
+
+        if ($this->schema === null) {
+            return;
+        }
+
+        $set = $submissions->validationSetFor($this->schema);
+
+        if (! isset($set['rules'][$property])) {
+            return;
+        }
+
+        // Presence is settled at submit time, when the whole form is known.
+        $rules = [$property => array_values(array_diff($set['rules'][$property], ['required']))];
+
+        $this->validateOnly($property, $rules, $set['messages'], $set['attributes']);
+    }
+
+    public function submit(SubmissionService $submissions): void
+    {
+        $this->load();
+
+        // An unusable schema has nothing to validate against, so there is
+        // nothing safe to write.
+        if ($this->form === null || $this->schema === null) {
+            return;
+        }
+
+        $this->submitError = null;
+
+        $ip = request()->ip();
+
+        if (! $this->withinRateLimit($ip)) {
+            return;
+        }
+
+        $this->values = $submissions->sanitizeValues($this->schema, $this->values);
+        $this->files = $submissions->sanitizeFiles($this->schema, $this->files);
+
+        // The presentation model is rebuilt from the sanitized input below.
+        $this->resolved = null;
+
+        $set = $submissions->validationSetFor($this->schema);
+
+        // Throws on failure: the visitor stays on the form, sees field errors,
+        // keeps their input, and nothing is written.
+        $this->validate($set['rules'], $set['messages'], $set['attributes']);
+
+        try {
+            $submissions->create(
+                $this->form,
+                $this->schema,
+                $this->values,
+                $this->files,
+                $ip,
+                request()->userAgent(),
+            );
+        } catch (Throwable $exception) {
+            Log::error('Public form submission failed.', [
+                'form_id' => $this->form->id,
+                'exception' => $exception,
+            ]);
+
+            $this->submitError = 'Something went wrong while saving your response. Please try again.';
+
+            return;
+        }
+
+        $this->submitted = true;
+        $this->successMessage = (string) ($this->schema['settings']['success_message'] ?? 'Thanks for your submission.');
+
+        // Clear the answers so a refresh or a back button cannot resubmit them.
+        $this->values = $submissions->defaultValues($this->schema);
+        $this->files = $submissions->defaultFiles($this->schema);
+        $this->resolved = null;
+        $this->resetValidation();
+    }
+
+    /**
+     * Throttle submissions per token and visitor.
+     *
+     * Every attempt counts, not just successful ones, because the work being
+     * protected happens whether or not validation passes. The limiter is only
+     * reachable from an already rendered form, so it cannot be used to probe
+     * whether a token is real, and the message never varies with the token.
+     */
+    protected function withinRateLimit(?string $ip): bool
+    {
+        $max = (int) config('formforge.public.submit_rate_limit_per_minute', 10);
+
+        if ($max <= 0) {
+            return true;
+        }
+
+        // Hashed so no raw address reaches the cache.
+        $key = 'form-submit:'.hash('sha256', $this->token.'|'.($ip ?? 'unknown'));
+
+        if (RateLimiter::tooManyAttempts($key, $max)) {
+            $seconds = RateLimiter::availableIn($key);
+
+            $this->submitError = "Too many submissions. Please try again in {$seconds} seconds.";
+
+            return false;
+        }
+
+        RateLimiter::hit($key, 60);
+
+        return true;
+    }
+
+    /**
+     * Read the published form and its schema once per request.
+     */
+    protected function load(): void
+    {
+        if ($this->loaded) {
+            return;
+        }
+
+        $this->loaded = true;
 
         $form = Form::query()
             ->published()
@@ -79,6 +254,27 @@ class PublicForm extends Component
                 'form_id' => $form->id,
             ]);
 
+            $this->form = $form;
+
+            return;
+        }
+
+        $this->form = $form;
+        $this->schema = $schema;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function resolve(): array
+    {
+        if ($this->resolved !== null) {
+            return $this->resolved;
+        }
+
+        $this->load();
+
+        if ($this->schema === null) {
             return $this->resolved = [
                 'unavailable' => true,
                 'title' => '',
@@ -88,6 +284,8 @@ class PublicForm extends Component
                 'hasFields' => false,
             ];
         }
+
+        $schema = $this->schema;
 
         $sections = array_map(fn (array $section): array => [
             'title' => $section['title'],
@@ -134,24 +332,36 @@ class PublicForm extends Component
     {
         $type = FieldType::tryFrom((string) $field['type']) ?? FieldType::Text;
         $validation = $field['validation'] ?? [];
+        $key = (string) $field['key'];
 
         // Keyed on the field key, which normalize guarantees is unique, so no
         // internal identifier is exposed in the markup.
-        $inputId = 'field-'.$field['key'];
+        $inputId = 'field-'.$key;
 
         $describedBy = [];
         if (($field['help_text'] ?? '') !== '') {
             $describedBy[] = $inputId.'-help';
         }
 
+        $name = ($type === FieldType::File ? 'files.' : 'values.').$key;
+        $invalid = $this->errorBagHas($name);
+
+        if ($invalid) {
+            $describedBy[] = $inputId.'-error';
+        }
+
         return [
             'id' => $inputId,
-            'key' => $field['key'],
+            'key' => $key,
+            'name' => $name,
+            'invalid' => $invalid,
             'type' => $type->value,
             'label' => $field['label'],
             'placeholder' => $field['placeholder'] ?? '',
             'helpText' => $field['help_text'] ?? '',
-            'default' => $this->defaultValue($field),
+            // Rendered from live state so a re-render after a validation error
+            // gives the visitor their own input back, not the schema default.
+            'value' => $this->currentValue($key, $type, $field),
             'required' => (bool) ($field['required'] ?? false),
             'options' => $field['options'] ?? [],
             'describedBy' => $describedBy === [] ? null : implode(' ', $describedBy),
@@ -167,13 +377,40 @@ class PublicForm extends Component
     }
 
     /**
-     * @param  array<string, mixed>  $field
+     * Checkbox members fail on an indexed key such as `values.topics.0`, so the
+     * wildcard is checked alongside the field itself.
      */
-    protected function defaultValue(array $field): string
+    protected function errorBagHas(string $name): bool
     {
-        $default = $field['default'] ?? null;
+        $errors = $this->getErrorBag();
 
-        return is_scalar($default) ? (string) $default : '';
+        return $errors->has($name) || $errors->has($name.'.*');
+    }
+
+    /**
+     * @param  array<string, mixed>  $field
+     * @return string|list<string>|null
+     */
+    protected function currentValue(string $key, FieldType $type, array $field): string|array|null
+    {
+        if ($type === FieldType::File) {
+            return null;
+        }
+
+        $value = $this->values[$key] ?? $field['default'] ?? null;
+
+        if ($type === FieldType::Checkbox) {
+            if (! is_array($value)) {
+                $value = is_scalar($value) && (string) $value !== '' ? [$value] : [];
+            }
+
+            return array_values(array_map(static fn ($item): string => (string) $item, array_filter(
+                $value,
+                static fn ($item): bool => is_scalar($item),
+            )));
+        }
+
+        return is_scalar($value) ? (string) $value : '';
     }
 
     /**

@@ -2,8 +2,9 @@
     'field',
 ])
 
-{{-- Radio based so it works without JavaScript and stays keyboard operable. --}}
-<fieldset @if ($field['describedBy']) aria-describedby="{{ $field['describedBy'] }}" @endif>
+{{-- Radio based so it stays keyboard operable and needs no custom widget. --}}
+<fieldset @if ($field['invalid']) aria-invalid="true" @endif
+          @if ($field['describedBy']) aria-describedby="{{ $field['describedBy'] }}" @endif>
     <x-form::label :field="$field" as="legend" />
 
     <div class="mt-2 flex flex-wrap gap-2">
@@ -12,8 +13,9 @@
                 <input id="{{ $field['id'] }}-{{ $value }}"
                        type="radio"
                        name="{{ $field['key'] }}"
+                       wire:model="{{ $field['name'] }}"
                        value="{{ $value }}"
-                       @checked((string) $field['default'] === (string) $value)
+                       @checked($field['value'] === (string) $value)
                        @if ($field['required']) required aria-required="true" @endif
                        class="peer sr-only">
 
@@ -27,3 +29,4 @@
 </fieldset>
 
 <x-form::help-text :field="$field" />
+<x-form::error :field="$field" />
