@@ -4,6 +4,7 @@
     'backUrl' => null,
     'unsaved' => false,
     'saved' => null,
+    'importLabel' => 'Import',
 ])
 
 <header class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-3 sm:px-6">
@@ -59,6 +60,9 @@
             :disabled="false"
             title="Generate or edit this form with AI"
             wire:click="toggleAiPanel">AI</x-builder::toolbar-button>
-        <x-builder::toolbar-button title="Import arrives in a later phase">Import</x-builder::toolbar-button>
+        <x-builder::toolbar-button
+            :disabled="false"
+            title="Build this form from a Word or Excel document"
+            wire:click="toggleImport">{{ $importLabel }}</x-builder::toolbar-button>
     </div>
 </header>

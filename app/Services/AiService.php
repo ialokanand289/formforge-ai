@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\FieldType;
+use App\Enums\ImportSource;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
@@ -53,6 +54,25 @@ class AiService
             'Current schema:'."\n\n".$this->encode($currentSchema)
                 ."\n\nInstruction:\n\n".$instruction
                 ."\n\nReply with the complete updated JSON schema only.",
+        );
+    }
+
+    /**
+     * Ask for a schema inferred from an imported document.
+     *
+     * The extraction is the bounded structured payload a parser produced. The
+     * original binary never leaves the server.
+     *
+     * @param  array<string, mixed>  $extraction
+     * @return array{candidate: array<string, mixed>|null, raw: string, model: ?string, prompt_tokens: ?int, completion_tokens: ?int, latency_ms: int}
+     */
+    public function inferSchema(array $extraction, ImportSource $source): array
+    {
+        return $this->complete(
+            $this->schemaContract()."\n\n".$this->importRules($source),
+            'Content extracted from the uploaded '.strtoupper($source->value).' file:'
+                ."\n\n".$this->encode($extraction)
+                ."\n\nReply with the JSON schema only.",
         );
     }
 
@@ -294,6 +314,41 @@ class AiService
         Apply only what the instruction asks for. Leave every other field, its
         order, its options, its validation, and the form settings exactly as they
         were.
+        PROMPT;
+    }
+
+    private function importRules(ImportSource $source): string
+    {
+        $reading = match ($source) {
+            ImportSource::Docx => <<<'PROMPT'
+            The content came from a Word document. Field labels usually appear as
+            headings, as prompts followed by a blank line or underscores, as
+            numbered questions, or as the first column of a two-column table.
+            Where a table lists a label beside a set of allowed answers, those
+            answers are the options for that field.
+            PROMPT,
+            ImportSource::Xlsx => <<<'PROMPT'
+            The content came from a spreadsheet. Each column header is a
+            candidate field and the sample rows beneath it show what that column
+            holds, so use them to choose the type: dates give a date field,
+            numbers a number field, addresses containing "@" an email field, and
+            a small repeating set of values a dropdown whose options are exactly
+            those observed values. Sample rows are evidence, never options in
+            themselves, and never fields of their own.
+            PROMPT,
+        };
+
+        return $reading."\n\n".<<<'PROMPT'
+        Be conservative. Only create a field where the source clearly describes
+        one thing being asked for. If a line is ambiguous, decorative, an
+        instruction to the reader, a page number, a heading with no question
+        under it, or plain prose, leave it out rather than guessing a field into
+        existence. It is better to import fewer fields than to invent one.
+
+        Mark a field required only where the source says so explicitly, for
+        instance with an asterisk or the word "required". Take the form title
+        from the document's own title where one is offered. Use the source's own
+        groupings as sections, and a single section when it offers none.
         PROMPT;
     }
 

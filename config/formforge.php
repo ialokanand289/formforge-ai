@@ -34,6 +34,33 @@ return [
         'max_prompt_chars' => (int) env('FORMFORGE_AI_MAX_PROMPT_CHARS', 2000),
     ],
 
+    'import' => [
+        // The disk and directory are shared with uploads: config('formforge.uploads.disk')
+        // and config('formforge.uploads.import_dir').
+        'max_file_size_kb' => (int) env('FORMFORGE_IMPORT_MAX_FILE_SIZE_KB', 10240),
+        'allowed_extensions' => ['docx', 'xlsx'],
+
+        // Bounds on what leaves the parser, so no document can grow the prompt
+        // without limit.
+        'max_paragraphs' => 300,
+        'max_headings' => 100,
+        'max_tables' => 20,
+        'max_table_rows' => 50,
+        'max_sheets' => 5,
+        'max_rows' => 50,
+        'max_columns' => 60,
+        'max_cell_chars' => 300,
+        'max_payload_chars' => 24000,
+
+        // How long a queued/processing row may sit before the pruner reclaims it.
+        'stale_after_minutes' => (int) env('FORMFORGE_IMPORT_STALE_AFTER_MINUTES', 60),
+
+        'archive' => [
+            'max_entries' => (int) env('FORMFORGE_IMPORT_MAX_ARCHIVE_ENTRIES', 512),
+            'max_uncompressed_bytes' => (int) env('FORMFORGE_IMPORT_MAX_UNCOMPRESSED_BYTES', 67108864),
+        ],
+    ],
+
     'cache' => [
         'schema_ttl_seconds' => (int) env('FORMFORGE_SCHEMA_CACHE_TTL', 3600),
         'schema_key' => 'form:schema:%s:v%s',
