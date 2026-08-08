@@ -21,5 +21,6 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Blade::anonymousComponentNamespace('livewire.forms.components', 'builder');
+        Blade::anonymousComponentNamespace('livewire.forms.public', 'form');
     }
 }

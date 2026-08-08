@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\FormStatus;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -36,6 +37,20 @@ class Form extends Model
             'schema_version' => 'integer',
             'published_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Forms reachable from the public renderer.
+     *
+     * Gated on status alone: published_at stays informational until the
+     * publish workflow exists.
+     *
+     * @param  Builder<Form>  $query
+     * @return Builder<Form>
+     */
+    public function scopePublished(Builder $query): Builder
+    {
+        return $query->where('status', FormStatus::Published);
     }
 
     public function user(): BelongsTo
