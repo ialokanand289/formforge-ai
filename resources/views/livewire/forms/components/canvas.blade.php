@@ -2,7 +2,19 @@
     'sections' => [],
 ])
 
-<main class="flex min-w-0 flex-1 flex-col bg-gray-100">
+<main class="flex min-w-0 flex-1 flex-col bg-gray-100"
+      x-data="{
+          draggingId: null,
+          overId: null,
+          overEdge: null,
+          overSectionId: null,
+          reset() {
+              this.draggingId = null;
+              this.overId = null;
+              this.overEdge = null;
+              this.overSectionId = null;
+          },
+      }">
     <div class="flex-1 overflow-y-auto p-4 sm:p-6">
         <div class="mx-auto max-w-3xl space-y-4">
             @forelse ($sections as $section)

@@ -156,14 +156,36 @@ class FormBuilder extends Component
         $this->loadFieldForm();
     }
 
+    /**
+     * Drag and drop entry point. Position is the drop index reported by the DOM.
+     */
+    public function moveField(string $fieldId, string $toSectionId, int $position): void
+    {
+        $this->moveFieldToPosition($fieldId, $toSectionId, $position);
+    }
+
     public function moveFieldUp(string $fieldId): void
     {
-        $this->moveFieldBy($fieldId, -1);
+        $located = $this->locateField($fieldId);
+
+        if ($located === null || $located['index'] === 0) {
+            return;
+        }
+
+        $this->moveFieldToPosition($fieldId, $located['sectionId'], $located['index'] - 1);
     }
 
     public function moveFieldDown(string $fieldId): void
     {
-        $this->moveFieldBy($fieldId, 1);
+        $located = $this->locateField($fieldId);
+
+        if ($located === null || $located['index'] === $located['lastIndex']) {
+            return;
+        }
+
+        // Insert before the field two slots down; the same-section adjustment
+        // in moveFieldToPosition() turns this into index + 1.
+        $this->moveFieldToPosition($fieldId, $located['sectionId'], $located['index'] + 2);
     }
 
     public function selectSection(string $sectionId): void
@@ -615,11 +637,13 @@ class FormBuilder extends Component
                 'title' => $section['title'],
                 'fieldCount' => count($fields),
                 'selected' => $section['id'] === $this->selectedSectionId,
-                'fields' => array_map(function (array $field, int $index) use ($lastIndex): array {
+                'fields' => array_map(function (array $field, int $index) use ($section, $lastIndex): array {
                     $type = FieldType::tryFrom($field['type']) ?? FieldType::Text;
 
                     return [
                         'id' => $field['id'],
+                        'sectionId' => $section['id'],
+                        'index' => $index,
                         'label' => $field['label'],
                         'type' => $type->value,
                         'typeLabel' => $this->labelFor($type),
@@ -669,26 +693,49 @@ class FormBuilder extends Component
         }
     }
 
-    protected function moveFieldBy(string $fieldId, int $offset): void
+    /**
+     * The single movement pipeline for both drag and drop and the arrow buttons.
+     *
+     * $position is an insert-before index measured against the field list as it
+     * currently stands, which is what the DOM reports on drop. SchemaService
+     * removes the field before splicing it back, so a same-section move to a
+     * later slot has to shed one index.
+     */
+    protected function moveFieldToPosition(string $fieldId, string $toSectionId, int $position): void
     {
         $located = $this->locateField($fieldId);
 
         if ($located === null) {
+            $this->schemaError = 'That field could not be found.';
+
             return;
         }
 
-        $position = $located['index'] + $offset;
+        // A destination that does not exist would drop the field entirely,
+        // since SchemaService removes it before looking for the target section.
+        if (! in_array($toSectionId, $this->sectionIds(), true)) {
+            $this->schemaError = 'That section could not be found.';
 
-        if ($position < 0 || $position > $located['lastIndex']) {
             return;
+        }
+
+        if ($located['sectionId'] === $toSectionId && $located['index'] < $position) {
+            $position--;
         }
 
         $this->commit($this->schemaService()->moveField(
             $this->schema,
             $fieldId,
-            $located['sectionId'],
+            $toSectionId,
             $position
         ));
+
+        // The field keeps its selection; the highlighted section follows it.
+        if ($this->selectedFieldId === $fieldId) {
+            $this->selectedSectionId = $toSectionId;
+        }
+
+        $this->loadFieldForm();
     }
 
     /**
