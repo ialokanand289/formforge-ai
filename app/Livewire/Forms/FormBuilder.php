@@ -5,14 +5,21 @@ namespace App\Livewire\Forms;
 use App\Enums\FieldType;
 use App\Enums\GenerationStatus;
 use App\Enums\GenerationType;
+use App\Enums\ImportSource;
+use App\Enums\ImportStatus;
 use App\Jobs\ProcessAiGenerationJob;
+use App\Jobs\ProcessImportJob;
 use App\Models\AiGenerationLog;
 use App\Models\Form;
+use App\Models\ImportJob;
 use App\Services\AiService;
+use App\Services\ImportArchiveGuard;
+use App\Services\SchemaCandidateGate;
 use App\Services\SchemaService;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Computed;
@@ -20,11 +27,14 @@ use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Title;
 use Livewire\Component;
+use Livewire\WithFileUploads;
+use RuntimeException;
 use Throwable;
 
 class FormBuilder extends Component
 {
     use AuthorizesRequests;
+    use WithFileUploads;
 
     public Form $form;
 
@@ -110,6 +120,45 @@ class FormBuilder extends Component
 
     #[Locked]
     public ?string $aiMessage = null;
+
+    public bool $showImport = false;
+
+    /**
+     * The pending upload. Livewire keeps this on the temporary upload disk,
+     * which resolves to the private local disk, until startImport() moves it.
+     */
+    public mixed $importFile = null;
+
+    /**
+     * The tracked ImportJob. Locked so a forged payload cannot point the poller
+     * or acceptImport() at a job this user does not own; every read re-scopes
+     * to the signed-in user and this form regardless.
+     */
+    #[Locked]
+    public ?string $importJobId = null;
+
+    #[Locked]
+    public ?string $importStatus = null;
+
+    #[Locked]
+    public ?string $importError = null;
+
+    /**
+     * Display-only summary of what the import found. Never the schema itself.
+     *
+     * @var array<string, mixed>|null
+     */
+    #[Locked]
+    public ?array $importPreview = null;
+
+    #[Locked]
+    public ?string $importFilename = null;
+
+    #[Locked]
+    public ?string $importSource = null;
+
+    #[Locked]
+    public ?string $importMessage = null;
 
     public function mount(Form $form, SchemaService $schemaService): void
     {
@@ -543,6 +592,383 @@ class FormBuilder extends Component
         }
 
         return implode(' ', $parts);
+    }
+
+    public function toggleImport(): void
+    {
+        $this->showImport = ! $this->showImport;
+    }
+
+    public function dismissImportError(): void
+    {
+        $this->importError = null;
+    }
+
+    /**
+     * Validate the upload, store it privately, and hand it to a queued job.
+     *
+     * Nothing is parsed here and nothing about the form changes: the browser
+     * never waits on a document reader or a model.
+     */
+    public function startImport(AiService $ai, ImportArchiveGuard $guard): void
+    {
+        $this->authorize('update', $this->form);
+
+        $this->importError = null;
+        $this->importMessage = null;
+
+        if (! $ai->isConfigured()) {
+            $this->importError = 'AI is not configured on this server, so documents cannot be imported.';
+
+            return;
+        }
+
+        // An import replaces the whole schema, so unsaved work would vanish.
+        if ($this->dirty) {
+            $this->importError = 'Save or discard your unsaved changes before importing a document.';
+
+            return;
+        }
+
+        if ($this->importInFlight()) {
+            $this->importError = 'An import is already running for this form.';
+
+            return;
+        }
+
+        $extensions = implode(',', (array) config('formforge.import.allowed_extensions', ['docx', 'xlsx']));
+
+        $this->validate([
+            'importFile' => [
+                'required',
+                'file',
+                'extensions:'.$extensions,
+                // Guesses from content, but both formats are ZIP containers and
+                // some systems report application/zip for each, so this narrows
+                // the field rather than settling it. The archive guard below is
+                // what actually defeats a renamed file.
+                'mimes:'.$extensions,
+                'max:'.$this->maxImportKb(),
+            ],
+        ], [], ['importFile' => 'document']);
+
+        $source = ImportSource::tryFrom(strtolower((string) $this->importFile->getClientOriginalExtension()));
+
+        if ($source === null) {
+            $this->importError = 'Only Word (.docx) and Excel (.xlsx) documents can be imported.';
+
+            return;
+        }
+
+        $disk = null;
+        $path = null;
+
+        try {
+            // Both the temporary upload and its destination must be private, so
+            // a misconfigured environment fails loudly rather than quietly
+            // publishing someone's document.
+            $guard->assertPrivate((string) config('livewire.temporary_file_upload.disk') ?: config('filesystems.default'));
+
+            $disk = $guard->disk();
+            $path = $this->importFile->storeAs(
+                $this->importDirectory(),
+                // The client filename is never a path component. It survives
+                // only as a label on the row.
+                Str::ulid().'.'.$source->value,
+                ['disk' => $disk],
+            );
+
+            // Inspected at its destination rather than at Livewire's temporary
+            // path, which encodes the original filename and can exceed the
+            // platform path limit that ZipArchive is subject to. This also
+            // inspects the exact bytes the worker will later read.
+            $guard->assertSafe(Storage::disk($disk)->path($path), $source);
+        } catch (RuntimeException $exception) {
+            $this->discardImportUpload($disk, $path);
+            $this->importError = $exception->getMessage();
+
+            return;
+        } catch (Throwable $exception) {
+            $this->discardImportUpload($disk, $path);
+
+            Log::error('Failed to store an import upload.', [
+                'form_id' => $this->form->id,
+                'exception' => $exception,
+            ]);
+
+            $this->importError = 'That document could not be uploaded. Please try again.';
+
+            return;
+        }
+
+        $job = ImportJob::query()->create([
+            // Never from the request: the owner is whoever is signed in.
+            'user_id' => Auth::id(),
+            'form_id' => $this->form->id,
+            'source' => $source,
+            'original_filename' => Str::limit(
+                (string) $this->importFile->getClientOriginalName(), 255, ''
+            ),
+            'disk_path' => $path,
+            'status' => ImportStatus::Queued,
+        ]);
+
+        $this->importJobId = $job->id;
+        $this->importFilename = $job->original_filename;
+        $this->importSource = $source->value;
+        $this->importPreview = null;
+        $this->reset('importFile');
+
+        ProcessImportJob::dispatch($job->id)
+            ->onQueue(config('formforge.queue.import'));
+
+        // Read the row back rather than assuming "queued": on a sync queue the
+        // job has already finished by the time dispatch() returns.
+        $this->refreshImportState();
+    }
+
+    /**
+     * Polled by the panel while an import is in flight.
+     */
+    public function pollImport(): void
+    {
+        $this->refreshImportState();
+    }
+
+    /**
+     * Apply a reviewed import. The only path from an import to forms.schema.
+     */
+    public function acceptImport(): void
+    {
+        $this->authorize('update', $this->form);
+
+        $this->importError = null;
+
+        // Edits made while the import was running would be replaced without a
+        // word, so the same guard that blocks starting an import blocks
+        // applying one.
+        if ($this->dirty) {
+            $this->importError = 'Save or discard your unsaved changes before applying this import.';
+
+            return;
+        }
+
+        $job = $this->trackedImport();
+
+        if ($job === null || $job->status !== ImportStatus::Preview) {
+            $this->importError = 'That import is no longer available to apply.';
+
+            return;
+        }
+
+        $schema = $job->final_schema;
+
+        if (! is_array($schema) || $schema === []) {
+            $this->importError = 'That import did not produce a schema to apply.';
+
+            return;
+        }
+
+        // Re-run the gates on the way in. The row has been sitting in the
+        // database since the worker wrote it, and it is not the browser's word
+        // for it that we trust, nor our own from ten minutes ago.
+        $errors = app(SchemaCandidateGate::class)->errorsFor($schema);
+
+        if ($errors === []) {
+            $errors = $this->schemaService()->validationErrors($schema);
+        }
+
+        if ($errors !== []) {
+            $this->importError = 'That import is no longer valid: '
+                .(collect($errors)->flatten()->first() ?? 'the schema was rejected.');
+
+            return;
+        }
+
+        try {
+            $form = $this->schemaService()->save(
+                $this->form,
+                $schema,
+                Auth::user(),
+                'Imported from '.$job->original_filename,
+            );
+        } catch (ValidationException $exception) {
+            $this->importError = 'That import could not be applied: '
+                .(collect($exception->errors())->flatten()->first() ?? 'the schema is invalid.');
+
+            return;
+        } catch (Throwable $exception) {
+            Log::error('Failed to apply an imported schema.', [
+                'form_id' => $this->form->id,
+                'import_job_id' => $job->id,
+                'exception' => $exception,
+            ]);
+
+            try {
+                $this->form->refresh();
+            } catch (Throwable) {
+                // The database is unreachable; the stale instance is the lesser problem.
+            }
+
+            $this->importError = 'That import could not be applied. Please try again.';
+
+            return;
+        }
+
+        $job->forceFill(['status' => ImportStatus::Committed])->save();
+
+        $this->form = $form;
+        $this->title = $form->title;
+        $this->status = $form->status->value;
+        $this->schema = $this->schemaService()->load($form);
+        // Already persisted through SchemaService, so there is nothing pending.
+        $this->dirty = false;
+        $this->schemaError = null;
+        $this->saveMessage = null;
+
+        $this->clearSelection();
+        $this->selectedSectionId = $this->schema['sections'][0]['id'] ?? null;
+        $this->loadFieldForm();
+
+        $this->importStatus = ImportStatus::Committed->value;
+        $this->importMessage = 'Imported '.$job->original_filename.' successfully.';
+        $this->importPreview = null;
+        $this->importJobId = null;
+        $this->showImport = false;
+
+        unset($this->schemaJson, $this->sections, $this->fieldEditor, $this->importRunning);
+    }
+
+    /**
+     * Stop tracking an import without ever rewriting its status.
+     *
+     * A queued or processing job may still be picked up by a worker that needs
+     * its row and its file, so cancelling clears the panel and nothing else.
+     * A preview left behind is inert: its file is already gone, importJobId is
+     * locked and cleared, and mount() never re-attaches to an import.
+     */
+    public function cancelImport(): void
+    {
+        $this->importJobId = null;
+        $this->importStatus = null;
+        $this->importPreview = null;
+        $this->importFilename = null;
+        $this->importSource = null;
+        $this->importError = null;
+        $this->importMessage = null;
+        $this->reset('importFile');
+        $this->resetErrorBag('importFile');
+
+        unset($this->importRunning);
+    }
+
+    #[Computed]
+    public function importRunning(): bool
+    {
+        return in_array($this->importStatus, [
+            ImportStatus::Queued->value,
+            ImportStatus::Processing->value,
+        ], true);
+    }
+
+    /**
+     * The toolbar button doubles as the import's status line.
+     */
+    public function importLabel(): string
+    {
+        return match ($this->importStatus) {
+            ImportStatus::Queued->value => 'Uploading...',
+            ImportStatus::Processing->value => 'Importing...',
+            ImportStatus::Preview->value => 'Review Import',
+            ImportStatus::Committed->value => 'Imported successfully',
+            ImportStatus::Failed->value => 'Import failed',
+            default => 'Import',
+        };
+    }
+
+    public function maxImportKb(): int
+    {
+        return max(1, (int) config('formforge.import.max_file_size_kb', 10240));
+    }
+
+    /**
+     * Read the tracked import and react when it reaches a terminal state.
+     */
+    protected function refreshImportState(): void
+    {
+        $job = $this->trackedImport();
+
+        if ($job === null) {
+            $this->importStatus = null;
+            $this->importJobId = null;
+
+            unset($this->importRunning);
+
+            return;
+        }
+
+        $this->importStatus = $job->status->value;
+        $this->importFilename = $job->original_filename;
+        $this->importSource = $job->source->value;
+
+        if ($job->status === ImportStatus::Preview) {
+            $this->importPreview = $job->preview;
+        }
+
+        if ($job->status === ImportStatus::Failed) {
+            $this->importError = $job->errors['message'] ?? 'The document could not be imported.';
+            $this->importPreview = null;
+            $this->importJobId = null;
+        }
+
+        unset($this->importRunning);
+    }
+
+    /**
+     * The tracked import, scoped so even a forged id can only ever read a job
+     * the viewer already owns on the form they already have open.
+     */
+    protected function trackedImport(): ?ImportJob
+    {
+        if ($this->importJobId === null) {
+            return null;
+        }
+
+        return ImportJob::query()
+            ->whereKey($this->importJobId)
+            ->where('user_id', Auth::id())
+            ->where('form_id', $this->form->id)
+            ->first();
+    }
+
+    protected function importInFlight(): bool
+    {
+        return ImportJob::query()
+            ->where('form_id', $this->form->id)
+            ->whereIn('status', [ImportStatus::Queued, ImportStatus::Processing])
+            ->exists();
+    }
+
+    /**
+     * Leave nothing behind when an upload is refused after it was written.
+     */
+    protected function discardImportUpload(?string $disk, ?string $path): void
+    {
+        if ($disk === null || $path === null) {
+            return;
+        }
+
+        try {
+            Storage::disk($disk)->delete($path);
+        } catch (Throwable) {
+            // Cleanup is best effort; the refusal is what matters.
+        }
+    }
+
+    protected function importDirectory(): string
+    {
+        return trim((string) config('formforge.uploads.import_dir', 'imports'), '/')
+            .'/'.$this->form->id;
     }
 
     public function updatedFieldForm(mixed $value, string $name): void

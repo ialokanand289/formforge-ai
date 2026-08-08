@@ -24,6 +24,7 @@
         :status="$status"
         :unsaved="$dirty"
         :saved="$saveMessage"
+        :import-label="$this->importLabel()"
         :back-url="route('forms.index')" />
 
     <x-builder::schema-alert :message="$schemaError" />
@@ -36,6 +37,17 @@
         :notice="$aiMessage"
         :error="$aiError"
         :max-chars="$this->maxPromptChars()" />
+
+    <x-builder::import-panel
+        :open="$showImport"
+        :running="$this->importRunning"
+        :status="$importStatus"
+        :preview="$importPreview"
+        :filename="$importFilename"
+        :source="$importSource"
+        :notice="$importMessage"
+        :error="$importError"
+        :max-kb="$this->maxImportKb()" />
 
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
         <x-builder::field-palette :fields="$paletteFields" />
