@@ -3,9 +3,10 @@
     'form' => [],
 ])
 
-<aside class="flex w-full shrink-0 flex-col border-t border-gray-200 bg-white lg:h-full lg:w-80 lg:border-l lg:border-t-0">
+<aside class="flex w-full shrink-0 flex-col border-t border-gray-200 bg-white lg:h-full lg:w-80 lg:border-l lg:border-t-0"
+       aria-labelledby="properties-panel-heading">
     <div class="shrink-0 border-b border-gray-200 px-4 py-3">
-        <h2 class="text-sm font-semibold text-gray-900">Properties</h2>
+        <h2 id="properties-panel-heading" class="text-sm font-semibold text-gray-900">Properties</h2>
         <p class="mt-0.5 text-xs text-gray-500">
             {{ $editor ? $editor['typeLabel'].' field' : 'Field settings' }}
         </p>
@@ -22,7 +23,9 @@
                 </span>
 
                 <p class="mt-3 text-sm font-medium text-gray-900">No field selected</p>
-                <p class="mt-1 text-xs text-gray-500">Field properties will appear here.</p>
+                <p class="mt-1 text-xs text-gray-500">
+                    Choose a field on the canvas to edit its label, validation, and options.
+                </p>
             </div>
         @else
             <div class="space-y-3">
@@ -107,13 +110,12 @@
                 @if ($editor['showOptions'])
                     <x-builder::property-card title="Options ({{ $editor['optionCount'] }})">
                         @error('fieldForm.options')
-                            <p class="text-[11px] font-medium text-red-600">{{ $message }}</p>
+                            <p class="text-[11px] font-medium text-red-600" role="alert">{{ $message }}</p>
                         @enderror
 
                         @foreach ($form['options'] ?? [] as $index => $option)
                             <x-builder::option-row
                                 :index="$index"
-                                :option="$option"
                                 :is-first="$index === 0"
                                 :is-last="$index === count($form['options']) - 1"
                                 wire:key="option-{{ $index }}" />
@@ -121,7 +123,10 @@
 
                         <button type="button"
                                 wire:click="addOption"
-                                class="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-gray-300 px-3 py-2 text-xs font-medium text-gray-600 transition hover:border-indigo-300 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+                                wire:target="addOption"
+                                wire:loading.attr="disabled"
+                                wire:loading.class="opacity-60"
+                                class="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-gray-300 px-3 py-2 text-xs font-medium text-gray-600 transition hover:border-indigo-300 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:cursor-wait">
                             <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                             </svg>

@@ -21,6 +21,6 @@
     </button>
 
     <div id="builder-json-preview" x-cloak x-show="open" class="border-t border-gray-200">
-        <pre class="max-h-72 overflow-auto bg-gray-900 p-4 text-xs leading-relaxed text-gray-100 sm:px-6"><code>{{ $json }}</code></pre>
+        <pre class="max-h-44 overflow-auto bg-gray-900 p-4 text-xs leading-relaxed text-gray-100 sm:max-h-72 sm:px-6"><code>{{ $json }}</code></pre>
     </div>
 </section>

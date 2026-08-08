@@ -14,7 +14,12 @@
     $id = 'prop-'.Str::slug(str_replace(['.', '_'], '-', $model));
     $errorKey = $model;
     $counted = $maxlength !== null;
-    $inputClasses = 'block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500';
+    $hasError = $errors->has($errorKey);
+    $hintId = $hint ? $id.'-hint' : null;
+    $errorId = $hasError ? $id.'-error' : null;
+    $describedBy = collect([$hintId, $errorId])->filter()->implode(' ');
+    $inputClasses = 'block w-full rounded-md text-sm shadow-sm focus:ring-indigo-500 '
+        .($hasError ? 'border-red-400 focus:border-red-500' : 'border-gray-300 focus:border-indigo-500');
 @endphp
 
 <div @if ($counted) x-data="{ count: @js(mb_strlen((string) $value)) }" @endif>
@@ -34,6 +39,8 @@
                       rows="{{ $rows }}"
                       wire:model.blur="{{ $model }}"
                       @if ($placeholder) placeholder="{{ $placeholder }}" @endif
+                      @if ($hasError) aria-invalid="true" @endif
+                      @if ($describedBy) aria-describedby="{{ $describedBy }}" @endif
                       @if ($counted) maxlength="{{ $maxlength }}" x-on:input="count = $event.target.value.length" @endif
                       class="{{ $inputClasses }}"></textarea>
         @else
@@ -42,16 +49,18 @@
                    wire:model.blur="{{ $model }}"
                    @if ($placeholder) placeholder="{{ $placeholder }}" @endif
                    @if ($min !== null) min="{{ $min }}" @endif
+                   @if ($hasError) aria-invalid="true" @endif
+                   @if ($describedBy) aria-describedby="{{ $describedBy }}" @endif
                    @if ($counted) maxlength="{{ $maxlength }}" x-on:input="count = $event.target.value.length" @endif
                    class="{{ $inputClasses }}">
         @endif
     </div>
 
     @if ($hint)
-        <p class="mt-1 text-[11px] text-gray-500">{{ $hint }}</p>
+        <p id="{{ $hintId }}" class="mt-1 text-[11px] text-gray-500">{{ $hint }}</p>
     @endif
 
     @error($errorKey)
-        <p class="mt-1 text-[11px] font-medium text-red-600">{{ $message }}</p>
+        <p id="{{ $errorId }}" class="mt-1 text-[11px] font-medium text-red-600">{{ $message }}</p>
     @enderror
 </div>

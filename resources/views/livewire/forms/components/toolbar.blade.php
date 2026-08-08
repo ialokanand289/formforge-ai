@@ -2,13 +2,14 @@
     'title' => 'Untitled Form',
     'status' => 'draft',
     'backUrl' => null,
+    'unsaved' => false,
 ])
 
-<header class="flex shrink-0 flex-wrap items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 sm:px-6">
-    <div class="flex min-w-0 flex-1 items-center gap-3">
+<header class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-3 sm:px-6">
+    <div class="flex min-w-0 flex-1 basis-full items-center gap-2 sm:basis-auto sm:gap-3">
         @if ($backUrl)
             <a href="{{ $backUrl }}"
-               class="inline-flex items-center rounded-md p-1.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-700"
+               class="inline-flex shrink-0 items-center rounded-md p-1.5 text-gray-500 transition hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                aria-label="Back to forms">
                 <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
@@ -21,9 +22,19 @@
         <span class="inline-flex shrink-0 items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium capitalize text-amber-800">
             {{ $status }}
         </span>
+
+        <span role="status" aria-live="polite" class="shrink-0">
+            @if ($unsaved)
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                    <span class="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true"></span>
+                    <span class="hidden sm:inline">Unsaved changes</span>
+                    <span class="sm:hidden">Unsaved</span>
+                </span>
+            @endif
+        </span>
     </div>
 
-    <div class="flex flex-wrap items-center gap-2">
+    <div class="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
         <x-builder::toolbar-button title="Saving arrives in a later phase">Save</x-builder::toolbar-button>
         <x-builder::toolbar-button title="Preview arrives in a later phase">Preview</x-builder::toolbar-button>
         <x-builder::toolbar-button title="AI generation arrives in a later phase">AI</x-builder::toolbar-button>
