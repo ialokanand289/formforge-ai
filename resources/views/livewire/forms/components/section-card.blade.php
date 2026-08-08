@@ -44,8 +44,19 @@
                 :field="$field"
                 wire:key="field-{{ $field['id'] }}" />
         @empty
-            <p class="rounded-lg border border-dashed border-gray-300 px-4 py-6 text-center text-sm text-gray-500">
-                No fields yet. Click a field type on the left.
+            <p class="rounded-lg border border-dashed px-4 py-6 text-center text-sm transition"
+               :class="overSectionId === @js($section['id'])
+                   ? 'border-indigo-400 bg-indigo-50/50 text-indigo-600'
+                   : 'border-gray-300 text-gray-500'"
+               x-on:dragover.prevent="if (draggingId !== null) { overSectionId = @js($section['id']); overId = null; overEdge = null }"
+               x-on:dragleave="if (! $el.contains($event.relatedTarget)) overSectionId = null"
+               x-on:drop.prevent="
+                   if (draggingId === null) { reset(); return; }
+                   $wire.moveField(draggingId, @js($section['id']), 0);
+                   reset();
+               ">
+                <span x-show="draggingId === null">No fields yet. Click a field type on the left.</span>
+                <span x-cloak x-show="draggingId !== null">Drop the field here.</span>
             </p>
         @endforelse
     </div>
