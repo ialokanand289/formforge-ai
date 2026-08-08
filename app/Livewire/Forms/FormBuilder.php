@@ -3,11 +3,17 @@
 namespace App\Livewire\Forms;
 
 use App\Enums\FieldType;
+use App\Enums\GenerationStatus;
+use App\Enums\GenerationType;
+use App\Jobs\ProcessAiGenerationJob;
+use App\Models\AiGenerationLog;
 use App\Models\Form;
+use App\Services\AiService;
 use App\Services\SchemaService;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
@@ -77,6 +83,33 @@ class FormBuilder extends Component
      */
     #[Locked]
     public ?string $saveMessage = null;
+
+    public bool $aiPanelOpen = false;
+
+    /**
+     * Either "generate" or "edit". Client-bound, so runAi() re-derives the
+     * GenerationType rather than trusting the string.
+     */
+    public string $aiMode = 'generate';
+
+    public string $aiPrompt = '';
+
+    /**
+     * The in-flight AiGenerationLog. Locked so a forged payload cannot point
+     * the poller at a log this user does not own; pollAi() re-scopes the query
+     * to the signed-in user regardless.
+     */
+    #[Locked]
+    public ?string $aiLogId = null;
+
+    #[Locked]
+    public ?string $aiStatus = null;
+
+    #[Locked]
+    public ?string $aiError = null;
+
+    #[Locked]
+    public ?string $aiMessage = null;
 
     public function mount(Form $form, SchemaService $schemaService): void
     {
@@ -298,6 +331,218 @@ class FormBuilder extends Component
     public function dismissSchemaError(): void
     {
         $this->schemaError = null;
+    }
+
+    public function toggleAiPanel(): void
+    {
+        $this->aiPanelOpen = ! $this->aiPanelOpen;
+    }
+
+    public function dismissAiError(): void
+    {
+        $this->aiError = null;
+    }
+
+    /**
+     * Queue an AI generation or edit for this form.
+     *
+     * Nothing here talks to the provider: the request is recorded and handed to
+     * a queued job, so the browser never waits on a model.
+     */
+    public function runAi(AiService $ai): void
+    {
+        $this->authorize('update', $this->form);
+
+        $this->aiError = null;
+        $this->aiMessage = null;
+
+        if (! $ai->isConfigured()) {
+            $this->aiError = 'AI is not configured on this server.';
+
+            return;
+        }
+
+        // Generation replaces the whole schema, so unsaved work would vanish.
+        if ($this->dirty) {
+            $this->aiError = 'Save or discard your unsaved changes before running AI.';
+
+            return;
+        }
+
+        if ($this->aiInFlight()) {
+            $this->aiError = 'An AI request is already running for this form.';
+
+            return;
+        }
+
+        $this->validate([
+            'aiPrompt' => ['required', 'string', 'min:3', 'max:'.$this->maxPromptChars()],
+        ], [], ['aiPrompt' => 'instruction']);
+
+        $log = AiGenerationLog::query()->create([
+            // Never from the request: the owner is whoever is signed in.
+            'user_id' => Auth::id(),
+            'form_id' => $this->form->id,
+            'type' => $this->aiMode === 'edit' ? GenerationType::Edit : GenerationType::Generate,
+            'prompt' => trim($this->aiPrompt),
+            'status' => GenerationStatus::Queued,
+        ]);
+
+        $this->aiLogId = $log->id;
+
+        ProcessAiGenerationJob::dispatch($log->id)
+            ->onQueue(config('formforge.queue.ai'));
+
+        // Read the row back rather than assuming "queued": on a sync queue the
+        // job has already finished by the time dispatch() returns.
+        $this->refreshAiState();
+    }
+
+    /**
+     * Polled by the panel while a request is in flight.
+     */
+    public function pollAi(): void
+    {
+        $this->refreshAiState();
+    }
+
+    #[Computed]
+    public function aiRunning(): bool
+    {
+        return in_array($this->aiStatus, [
+            GenerationStatus::Queued->value,
+            GenerationStatus::Processing->value,
+        ], true);
+    }
+
+    public function maxPromptChars(): int
+    {
+        return max(1, (int) config('formforge.ai.max_prompt_chars', 2000));
+    }
+
+    /**
+     * Read the tracked log and react when it reaches a terminal state.
+     */
+    protected function refreshAiState(): void
+    {
+        if ($this->aiLogId === null) {
+            return;
+        }
+
+        // Scoped to the signed-in user and this form, so even a forged id can
+        // only ever read a log the viewer already owns.
+        $log = AiGenerationLog::query()
+            ->whereKey($this->aiLogId)
+            ->where('user_id', Auth::id())
+            ->where('form_id', $this->form->id)
+            ->first();
+
+        if ($log === null) {
+            $this->stopTracking(null);
+
+            return;
+        }
+
+        $this->aiStatus = $log->status->value;
+
+        if ($log->status === GenerationStatus::Completed) {
+            $this->applyAiResult();
+            $this->stopTracking(GenerationStatus::Completed->value);
+
+            return;
+        }
+
+        if ($log->status === GenerationStatus::Failed) {
+            $this->aiError = $log->error_message ?: 'The AI request could not be completed.';
+            $this->stopTracking(GenerationStatus::Failed->value);
+        }
+    }
+
+    /**
+     * Drop the tracked log so the panel stops polling.
+     */
+    protected function stopTracking(?string $status): void
+    {
+        $this->aiLogId = null;
+        $this->aiStatus = $status;
+    }
+
+    /**
+     * Pull the AI's saved schema back out of the database.
+     *
+     * The job persisted through SchemaService, so this re-reads rather than
+     * trusting anything carried over from the request that started it.
+     */
+    protected function applyAiResult(): void
+    {
+        $before = $this->fieldKeys();
+
+        $this->form->refresh();
+        $this->title = $this->form->title;
+        $this->status = $this->form->status->value;
+        $this->schema = $this->schemaService()->load($this->form);
+        $this->dirty = false;
+        $this->schemaError = null;
+        $this->saveMessage = null;
+        $this->aiPrompt = '';
+
+        $this->clearSelection();
+        $this->loadFieldForm();
+
+        unset($this->schemaJson, $this->sections, $this->fieldEditor, $this->aiRunning);
+
+        $this->aiMessage = $this->summarizeKeyChanges($before, $this->fieldKeys());
+    }
+
+    protected function aiInFlight(): bool
+    {
+        return AiGenerationLog::query()
+            ->where('form_id', $this->form->id)
+            ->whereIn('status', [GenerationStatus::Queued, GenerationStatus::Processing])
+            ->exists();
+    }
+
+    /**
+     * @return list<string>
+     */
+    protected function fieldKeys(): array
+    {
+        $keys = [];
+
+        foreach ($this->schema['sections'] ?? [] as $section) {
+            foreach ($section['fields'] ?? [] as $field) {
+                $keys[] = (string) ($field['key'] ?? '');
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Name what the edit added and removed.
+     *
+     * A removal is legitimate but must never be silent, because answers already
+     * filed under a removed key stop appearing beside the live fields.
+     *
+     * @param  list<string>  $before
+     * @param  list<string>  $after
+     */
+    protected function summarizeKeyChanges(array $before, array $after): string
+    {
+        $added = array_values(array_diff($after, $before));
+        $removed = array_values(array_diff($before, $after));
+
+        $parts = ['The form was updated by AI.'];
+
+        if ($added !== []) {
+            $parts[] = Str::plural('Field', $added).' added: '.implode(', ', $added).'.';
+        }
+
+        if ($removed !== []) {
+            $parts[] = Str::plural('Field', $removed).' removed: '.implode(', ', $removed).'.';
+        }
+
+        return implode(' ', $parts);
     }
 
     public function updatedFieldForm(mixed $value, string $name): void

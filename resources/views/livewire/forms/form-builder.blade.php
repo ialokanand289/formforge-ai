@@ -28,6 +28,15 @@
 
     <x-builder::schema-alert :message="$schemaError" />
 
+    <x-builder::ai-panel
+        :open="$aiPanelOpen"
+        :mode="$aiMode"
+        :running="$this->aiRunning"
+        :status="$aiStatus"
+        :notice="$aiMessage"
+        :error="$aiError"
+        :max-chars="$this->maxPromptChars()" />
+
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
         <x-builder::field-palette :fields="$paletteFields" />
 

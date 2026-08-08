@@ -55,7 +55,10 @@
             <span wire:loading wire:target="save">Saving...</span>
         </x-builder::toolbar-button>
         <x-builder::toolbar-button title="Preview arrives in a later phase">Preview</x-builder::toolbar-button>
-        <x-builder::toolbar-button title="AI generation arrives in a later phase">AI</x-builder::toolbar-button>
+        <x-builder::toolbar-button
+            :disabled="false"
+            title="Generate or edit this form with AI"
+            wire:click="toggleAiPanel">AI</x-builder::toolbar-button>
         <x-builder::toolbar-button title="Import arrives in a later phase">Import</x-builder::toolbar-button>
     </div>
 </header>
