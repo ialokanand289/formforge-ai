@@ -22,11 +22,16 @@ return [
     ],
 
     'ai' => [
+        'api_key' => env('OPENAI_API_KEY'),
+        'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
         'model' => env('FORMFORGE_AI_MODEL', 'gpt-4o-mini'),
         'temperature' => (float) env('FORMFORGE_AI_TEMPERATURE', 0.2),
         'max_tokens' => (int) env('FORMFORGE_AI_MAX_TOKENS', 4096),
+        // The number of REPAIR calls allowed after the initial call, not the
+        // total call budget: 3 here means at most 4 provider calls.
         'max_repair_attempts' => (int) env('FORMFORGE_AI_MAX_REPAIR_ATTEMPTS', 3),
         'timeout_seconds' => (int) env('FORMFORGE_AI_TIMEOUT', 60),
+        'max_prompt_chars' => (int) env('FORMFORGE_AI_MAX_PROMPT_CHARS', 2000),
     ],
 
     'cache' => [
