@@ -1,0 +1,17 @@
+@props([
+    'field',
+])
+
+<x-form::label :field="$field" />
+
+<textarea id="{{ $field['id'] }}"
+          name="{{ $field['key'] }}"
+          rows="4"
+          @if ($field['placeholder'] !== '') placeholder="{{ $field['placeholder'] }}" @endif
+          @if ($field['required']) required aria-required="true" @endif
+          @if ($field['minLength'] !== null) minlength="{{ $field['minLength'] }}" @endif
+          @if ($field['maxLength'] !== null) maxlength="{{ $field['maxLength'] }}" @endif
+          @if ($field['describedBy']) aria-describedby="{{ $field['describedBy'] }}" @endif
+          class="mt-1.5 block w-full rounded-lg border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">{{ $field['default'] }}</textarea>
+
+<x-form::help-text :field="$field" />

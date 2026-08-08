@@ -32,4 +32,9 @@ class FormFactory extends Factory
             'published_at' => null,
         ];
     }
+
+    public function published(): static
+    {
+        return $this->state(fn () => ['status' => FormStatus::Published]);
+    }
 }
