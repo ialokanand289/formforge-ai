@@ -29,6 +29,12 @@
                                     {{ $form->status->value }}
                                 </span>
 
+                                {{-- A plain link so the browser handles the streamed download. --}}
+                                <a href="{{ route('forms.submissions.export', $form) }}"
+                                   class="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50">
+                                    Export CSV
+                                </a>
+
                                 <a href="{{ route('forms.builder', $form) }}"
                                    class="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-500">
                                     Open Builder
