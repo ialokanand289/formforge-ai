@@ -9,7 +9,9 @@
             @if ($forms->isEmpty())
                 <div class="px-6 py-12 text-center">
                     <p class="text-sm font-medium text-gray-900">No forms yet</p>
-                    <p class="mt-1 text-sm text-gray-500">Forms you create will be listed here.</p>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Every form you create will be listed here, ready to open in the builder.
+                    </p>
                 </div>
             @else
                 <ul class="divide-y divide-gray-200">

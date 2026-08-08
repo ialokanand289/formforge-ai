@@ -59,9 +59,15 @@ class FormBuilder extends Component
     protected array $history = [];
 
     /**
-     * Reserved for future autosave support. Not acted on in this phase.
+     * True once the in-memory schema has diverged from its initial state.
+     *
+     * Server-controlled: commit() is the only writer, and only after the
+     * schema validates. Locked so a request payload cannot set it, never
+     * bound with wire:model, and never taken as an action argument. There is
+     * no reset path because persistence is out of scope.
      */
-    protected bool $dirty = false;
+    #[Locked]
+    public bool $dirty = false;
 
     public function mount(Form $form, SchemaService $schemaService): void
     {
@@ -205,6 +211,25 @@ class FormBuilder extends Component
 
         $this->selectedSectionId = $located['sectionId'];
         $this->selectedFieldId = $fieldId;
+        $this->loadFieldForm($located['field']);
+    }
+
+    /**
+     * Delete shortcut target. Takes no id so the client cannot name a victim.
+     */
+    public function deleteSelectedField(): void
+    {
+        if ($this->selectedFieldId === null) {
+            return;
+        }
+
+        $this->removeField($this->selectedFieldId);
+    }
+
+    public function deselect(): void
+    {
+        $this->selectedFieldId = null;
+        $this->selectedSectionId = null;
         $this->loadFieldForm();
     }
 
@@ -304,12 +329,16 @@ class FormBuilder extends Component
 
     /**
      * Mirror the selected field into the editable form, or empty it.
+     *
+     * Callers that already hold the field can pass it to skip the lookup.
+     *
+     * @param  array<string, mixed>|null  $field
      */
-    protected function loadFieldForm(): void
+    protected function loadFieldForm(?array $field = null): void
     {
         unset($this->fieldEditor);
 
-        $field = $this->selectedField();
+        $field ??= $this->selectedField();
 
         if ($field === null) {
             $this->fieldForm = [];
@@ -763,7 +792,7 @@ class FormBuilder extends Component
     }
 
     /**
-     * @return array{sectionId: string, index: int, lastIndex: int}|null
+     * @return array{sectionId: string, index: int, lastIndex: int, field: array<string, mixed>}|null
      */
     protected function locateField(string $fieldId): ?array
     {
@@ -774,6 +803,7 @@ class FormBuilder extends Component
                         'sectionId' => $section['id'],
                         'index' => $index,
                         'lastIndex' => count($section['fields']) - 1,
+                        'field' => $field,
                     ];
                 }
             }

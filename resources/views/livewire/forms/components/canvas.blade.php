@@ -14,7 +14,9 @@
               this.overEdge = null;
               this.overSectionId = null;
           },
-      }">
+      }"
+      x-on:keydown.escape.window="reset()"
+      aria-label="Form canvas">
     <div class="flex-1 overflow-y-auto p-4 sm:p-6">
         <div class="mx-auto max-w-3xl space-y-4">
             @forelse ($sections as $section)
@@ -31,14 +33,19 @@
                         </span>
 
                         <h2 class="mt-4 text-base font-semibold text-gray-900">Start building your form</h2>
-                        <p class="mt-1 text-sm text-gray-500">Select a field from the left to see it here.</p>
+                        <p class="mt-1 text-sm text-gray-500">
+                            Pick a field from the palette and it will land in a new section here.
+                        </p>
                     </div>
                 </div>
             @endforelse
 
             <button type="button"
                     wire:click="addSection"
-                    class="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-600 transition hover:border-indigo-300 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+                    wire:target="addSection"
+                    wire:loading.attr="disabled"
+                    wire:loading.class="opacity-60"
+                    class="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-600 transition hover:border-indigo-300 hover:text-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:cursor-wait">
                 <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                 </svg>
