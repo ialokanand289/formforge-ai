@@ -23,6 +23,7 @@
         :title="$title"
         :status="$status"
         :unsaved="$dirty"
+        :saved="$saveMessage"
         :back-url="route('forms.index')" />
 
     <x-builder::schema-alert :message="$schemaError" />

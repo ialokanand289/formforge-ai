@@ -6,12 +6,15 @@ use App\Enums\FieldType;
 use App\Models\Form;
 use App\Services\SchemaService;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Title;
 use Livewire\Component;
+use Throwable;
 
 class FormBuilder extends Component
 {
@@ -69,6 +72,12 @@ class FormBuilder extends Component
     #[Locked]
     public bool $dirty = false;
 
+    /**
+     * Transient success feedback. Server-set only, cleared by the next mutation.
+     */
+    #[Locked]
+    public ?string $saveMessage = null;
+
     public function mount(Form $form, SchemaService $schemaService): void
     {
         $this->authorize('view', $form);
@@ -76,7 +85,7 @@ class FormBuilder extends Component
         $this->form = $form;
         $this->title = $form->title;
         $this->status = $form->status->value;
-        $this->schema = $schemaService->blank($form->title);
+        $this->schema = $schemaService->load($form);
         $this->paletteFields = $this->buildPalette();
         $this->selectedSectionId = $this->schema['sections'][0]['id'] ?? null;
         $this->loadFieldForm();
@@ -231,6 +240,59 @@ class FormBuilder extends Component
         $this->selectedFieldId = null;
         $this->selectedSectionId = null;
         $this->loadFieldForm();
+    }
+
+    /**
+     * Persist the working schema through the single persistence entry point.
+     */
+    public function save(): void
+    {
+        $this->authorize('update', $this->form);
+
+        // Nothing changed, so there is nothing to version.
+        if (! $this->dirty) {
+            return;
+        }
+
+        try {
+            $form = $this->schemaService()->save($this->form, $this->schema, Auth::user());
+        } catch (ValidationException $exception) {
+            $this->schemaError = 'Save was rejected: '
+                .(collect($exception->errors())->flatten()->first() ?? 'the schema is invalid.');
+
+            return;
+        } catch (Throwable $exception) {
+            Log::error('Failed to save form schema.', [
+                'form_id' => $this->form->id,
+                'exception' => $exception,
+            ]);
+
+            // The rolled-back write left mutated attributes on the instance.
+            try {
+                $this->form->refresh();
+            } catch (Throwable) {
+                // The database is unreachable; the stale instance is the lesser problem.
+            }
+
+            $this->schemaError = 'Your changes could not be saved. Please try again.';
+
+            return;
+        }
+
+        $selectedFieldId = $this->selectedFieldId;
+        $selectedSectionId = $this->selectedSectionId;
+
+        $this->form = $form;
+        $this->title = $form->title;
+        $this->status = $form->status->value;
+        $this->schema = $this->schemaService()->load($form);
+        $this->dirty = false;
+        $this->schemaError = null;
+        $this->saveMessage = 'Form saved successfully.';
+
+        $this->restoreSelection($selectedFieldId, $selectedSectionId);
+
+        unset($this->schemaJson, $this->sections, $this->fieldEditor);
     }
 
     public function dismissSchemaError(): void
@@ -700,12 +762,39 @@ class FormBuilder extends Component
             $this->schema = $normalized;
             $this->schemaError = null;
             $this->dirty = true;
+            $this->saveMessage = null;
         } catch (ValidationException $exception) {
             $this->schemaError = 'That change was rejected: '
                 .(collect($exception->errors())->flatten()->first() ?? 'the schema would become invalid.');
         }
 
         unset($this->schemaJson, $this->sections, $this->fieldEditor);
+    }
+
+    /**
+     * Reapply a selection captured before the schema was replaced.
+     *
+     * The containing section is resolved from the new schema rather than
+     * trusted from the captured value, so a field that changed sections still
+     * highlights in the right place.
+     */
+    protected function restoreSelection(?string $fieldId, ?string $sectionId): void
+    {
+        $located = $fieldId !== null ? $this->locateField($fieldId) : null;
+
+        if ($located !== null) {
+            $this->selectedFieldId = $fieldId;
+            $this->selectedSectionId = $located['sectionId'];
+            $this->loadFieldForm($located['field']);
+
+            return;
+        }
+
+        $this->selectedFieldId = null;
+        $this->selectedSectionId = in_array($sectionId, $this->sectionIds(), true)
+            ? $sectionId
+            : null;
+        $this->loadFieldForm();
     }
 
     /**
