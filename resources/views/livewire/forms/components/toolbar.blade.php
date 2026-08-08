@@ -3,6 +3,7 @@
     'status' => 'draft',
     'backUrl' => null,
     'unsaved' => false,
+    'saved' => null,
 ])
 
 <header class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 bg-white px-3 py-3 sm:px-6">
@@ -30,12 +31,29 @@
                     <span class="hidden sm:inline">Unsaved changes</span>
                     <span class="sm:hidden">Unsaved</span>
                 </span>
+            @elseif ($saved)
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                    <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    {{ $saved }}
+                </span>
             @endif
         </span>
     </div>
 
     <div class="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
-        <x-builder::toolbar-button title="Saving arrives in a later phase">Save</x-builder::toolbar-button>
+        <x-builder::toolbar-button
+            tone="primary"
+            :disabled="! $unsaved"
+            :title="$unsaved ? 'Save changes' : 'No changes to save'"
+            wire:click="save"
+            wire:target="save"
+            wire:loading.attr="disabled"
+            wire:loading.class="opacity-70">
+            <span wire:loading.remove wire:target="save">Save</span>
+            <span wire:loading wire:target="save">Saving...</span>
+        </x-builder::toolbar-button>
         <x-builder::toolbar-button title="Preview arrives in a later phase">Preview</x-builder::toolbar-button>
         <x-builder::toolbar-button title="AI generation arrives in a later phase">AI</x-builder::toolbar-button>
         <x-builder::toolbar-button title="Import arrives in a later phase">Import</x-builder::toolbar-button>
