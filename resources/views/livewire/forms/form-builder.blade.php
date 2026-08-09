@@ -25,7 +25,10 @@
         :unsaved="$dirty"
         :saved="$saveMessage"
         :import-label="$this->importLabel()"
-        :back-url="route('forms.index')" />
+        :back-url="route('forms.index')"
+        :versions-url="route('forms.versions', $form)"
+        :submissions-url="route('forms.submissions.index', $form)"
+        :public-url="$this->publicUrl" />
 
     <x-builder::schema-alert :message="$schemaError" />
 
@@ -57,5 +60,5 @@
         <x-builder::properties-panel :editor="$this->fieldEditor" :form="$fieldForm" />
     </div>
 
-    <x-builder::json-preview :json="$this->schemaJson" />
+    <x-builder::json-preview :json="$schemaDraft" :error="$jsonError" :message="$jsonMessage" />
 </div>
