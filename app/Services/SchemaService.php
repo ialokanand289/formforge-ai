@@ -12,12 +12,12 @@ use Illuminate\Validation\ValidationException;
 
 class SchemaService
 {
-    public function blank(string $title = 'Untitled Form'): array
+    public function blank(string $title = 'Untitled Form', string $description = ''): array
     {
         return $this->normalize([
             'schema_version' => 1,
             'title' => $title,
-            'description' => '',
+            'description' => $description,
             'settings' => [
                 'multi_step' => false,
                 'submit_button_text' => 'Submit',
@@ -277,6 +277,320 @@ class SchemaService
         }
 
         return $errors;
+    }
+
+    /**
+     * Compare two schemas structurally, without touching either one.
+     *
+     * Called as diff($historical, $current), so "added" reads as "added since
+     * that version". Neither argument goes through normalize(): a stored
+     * snapshot has to be reported exactly as it was written, and repairing it
+     * on the way past would describe a document nobody saved.
+     *
+     * Entries are matched on their id where one is present, falling back to the
+     * field key or the section title. That fallback is what makes a legacy
+     * snapshot comparable at all, since ids were not always written. A pair
+     * matched by key cannot report a key change, because a renamed key with no
+     * id is indistinguishable from a removal plus an addition.
+     *
+     * @param  array<string, mixed>  $from
+     * @param  array<string, mixed>  $to
+     * @return array<string, mixed>
+     */
+    public function diff(array $from, array $to): array
+    {
+        $sections = $this->diffSections(
+            $this->comparableList($from['sections'] ?? null),
+            $this->comparableList($to['sections'] ?? null),
+        );
+
+        $summary = [
+            'sections_added' => 0,
+            'sections_removed' => 0,
+            'sections_changed' => 0,
+            'fields_added' => 0,
+            'fields_removed' => 0,
+            'fields_changed' => 0,
+        ];
+
+        foreach ($sections as $section) {
+            if ($section['status'] !== 'unchanged') {
+                $summary['sections_'.$section['status']]++;
+            }
+
+            foreach ($section['fields'] as $field) {
+                if ($field['status'] !== 'unchanged') {
+                    $summary['fields_'.$field['status']]++;
+                }
+            }
+        }
+
+        $title = $this->diffValue($from['title'] ?? null, $to['title'] ?? null, 'string');
+        $description = $this->diffValue($from['description'] ?? null, $to['description'] ?? null, 'string');
+
+        $summary['has_changes'] = $title['changed']
+            || $description['changed']
+            || array_sum($summary) > 0;
+
+        return [
+            'title' => $title,
+            'description' => $description,
+            'sections' => $sections,
+            'summary' => $summary,
+        ];
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $from
+     * @param  list<array<string, mixed>>  $to
+     * @return list<array<string, mixed>>
+     */
+    private function diffSections(array $from, array $to): array
+    {
+        $fromById = $this->keyByIdentity($from, 'title');
+        $toById = $this->keyByIdentity($to, 'title');
+
+        $result = [];
+
+        // Present order first, so the reader sees the schema as it is now.
+        foreach ($toById as $identity => $section) {
+            $previous = $fromById[$identity] ?? null;
+
+            if ($previous === null) {
+                $result[] = $this->wholeSection($section, 'added');
+
+                continue;
+            }
+
+            $changes = array_filter([
+                'title' => $this->changeOrNull($previous['title'] ?? null, $section['title'] ?? null, 'string'),
+                'description' => $this->changeOrNull($previous['description'] ?? null, $section['description'] ?? null, 'string'),
+            ]);
+
+            $fields = $this->diffFields(
+                $this->comparableList($previous['fields'] ?? null),
+                $this->comparableList($section['fields'] ?? null),
+            );
+
+            $touched = $changes !== [] || $this->anyChanged($fields);
+
+            $result[] = [
+                'status' => $touched ? 'changed' : 'unchanged',
+                'title' => $this->displayString($section['title'] ?? null, 'Untitled Section'),
+                'changes' => $changes,
+                'fields' => $fields,
+            ];
+        }
+
+        foreach ($fromById as $identity => $section) {
+            if (! isset($toById[$identity])) {
+                $result[] = $this->wholeSection($section, 'removed');
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $from
+     * @param  list<array<string, mixed>>  $to
+     * @return list<array<string, mixed>>
+     */
+    private function diffFields(array $from, array $to): array
+    {
+        $fromById = $this->keyByIdentity($from, 'key');
+        $toById = $this->keyByIdentity($to, 'key');
+
+        $result = [];
+
+        foreach ($toById as $identity => $field) {
+            $previous = $fromById[$identity] ?? null;
+
+            if ($previous === null) {
+                $result[] = $this->wholeField($field, 'added');
+
+                continue;
+            }
+
+            $changes = [];
+
+            foreach (self::COMPARED_FIELD_PROPERTIES as $property => $shape) {
+                $change = $this->changeOrNull($previous[$property] ?? null, $field[$property] ?? null, $shape);
+
+                if ($change !== null) {
+                    $changes[$property] = $change;
+                }
+            }
+
+            $result[] = [
+                'status' => $changes === [] ? 'unchanged' : 'changed',
+                'label' => $this->displayString($field['label'] ?? null, 'Untitled Field'),
+                'key' => $this->displayString($field['key'] ?? null, ''),
+                'changes' => $changes,
+            ];
+        }
+
+        foreach ($fromById as $identity => $field) {
+            if (! isset($toById[$identity])) {
+                $result[] = $this->wholeField($field, 'removed');
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * The properties a field change is reported against.
+     */
+    private const COMPARED_FIELD_PROPERTIES = [
+        'label' => 'string',
+        'key' => 'string',
+        'type' => 'string',
+        'placeholder' => 'string',
+        'help_text' => 'string',
+        'default' => 'raw',
+        'required' => 'bool',
+        'options' => 'list',
+        'validation' => 'list',
+        'conditions' => 'list',
+    ];
+
+    /**
+     * @param  array<string, mixed>  $section
+     * @return array<string, mixed>
+     */
+    private function wholeSection(array $section, string $status): array
+    {
+        return [
+            'status' => $status,
+            'title' => $this->displayString($section['title'] ?? null, 'Untitled Section'),
+            'changes' => [],
+            'fields' => array_map(
+                fn (array $field): array => $this->wholeField($field, $status),
+                $this->comparableList($section['fields'] ?? null),
+            ),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $field
+     * @return array<string, mixed>
+     */
+    private function wholeField(array $field, string $status): array
+    {
+        return [
+            'status' => $status,
+            'label' => $this->displayString($field['label'] ?? null, 'Untitled Field'),
+            'key' => $this->displayString($field['key'] ?? null, ''),
+            'changes' => [],
+        ];
+    }
+
+    /**
+     * Drop anything that is not an array, so a malformed entry cannot be
+     * dereferenced further down.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function comparableList(mixed $entries): array
+    {
+        if (! is_array($entries)) {
+            return [];
+        }
+
+        return array_values(array_filter($entries, 'is_array'));
+    }
+
+    /**
+     * Index entries by their matching identity, preserving document order.
+     *
+     * @param  list<array<string, mixed>>  $entries
+     * @return array<string, array<string, mixed>>
+     */
+    private function keyByIdentity(array $entries, string $fallbackProperty): array
+    {
+        $keyed = [];
+
+        foreach ($entries as $index => $entry) {
+            $id = $entry['id'] ?? null;
+
+            if (is_string($id) && trim($id) !== '') {
+                $identity = 'id:'.Str::upper(trim($id));
+            } else {
+                $fallback = $entry[$fallbackProperty] ?? null;
+                $identity = is_string($fallback) && trim($fallback) !== ''
+                    ? $fallbackProperty.':'.Str::lower(trim($fallback))
+                    : 'index:'.$index;
+            }
+
+            // A repeated identity would silently swallow an entry, so later
+            // duplicates fall back to their position.
+            if (isset($keyed[$identity])) {
+                $identity .= '#'.$index;
+            }
+
+            $keyed[$identity] = $entry;
+        }
+
+        return $keyed;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $entries
+     */
+    private function anyChanged(array $entries): bool
+    {
+        foreach ($entries as $entry) {
+            if ($entry['status'] !== 'unchanged') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array{from: mixed, to: mixed}|null
+     */
+    private function changeOrNull(mixed $from, mixed $to, string $shape): ?array
+    {
+        $change = $this->diffValue($from, $to, $shape);
+
+        return $change['changed'] ? ['from' => $change['from'], 'to' => $change['to']] : null;
+    }
+
+    /**
+     * Compare one property, coercing only for the comparison itself.
+     *
+     * A legacy snapshot may hold null where the current schema holds an empty
+     * string, or 1 where it holds true. Those are the same answer written two
+     * ways, and reporting them as edits would bury the real changes.
+     *
+     * @return array{from: mixed, to: mixed, changed: bool}
+     */
+    private function diffValue(mixed $from, mixed $to, string $shape): array
+    {
+        $left = $this->comparable($from, $shape);
+        $right = $this->comparable($to, $shape);
+
+        return ['from' => $left, 'to' => $right, 'changed' => $left !== $right];
+    }
+
+    private function comparable(mixed $value, string $shape): mixed
+    {
+        return match ($shape) {
+            'string' => is_scalar($value) ? (string) $value : '',
+            'bool' => (bool) $value,
+            'list' => is_array($value) ? $value : [],
+            default => $value,
+        };
+    }
+
+    private function displayString(mixed $value, string $fallback): string
+    {
+        $text = is_scalar($value) ? trim((string) $value) : '';
+
+        return $text === '' ? $fallback : $text;
     }
 
     public function save(Form $form, array $schema, ?User $actor = null, ?string $note = null): Form

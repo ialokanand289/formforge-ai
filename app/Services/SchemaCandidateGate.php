@@ -110,6 +110,84 @@ class SchemaCandidateGate
     }
 
     /**
+     * Reject a candidate that normalize() had to repair to make valid.
+     *
+     * errorsFor() catches the repairs that matter to a machine-authored
+     * schema. A hand-authored one needs more, because normalize() will also
+     * slugify "Full Name" into full_name, replace any id that is not a ULID,
+     * and drop a section or field whose shape it cannot read. Each of those
+     * silently produces a form the author did not write, which is the one
+     * outcome a raw editor must not have.
+     *
+     * Comparison is positional, which is safe because normalize() preserves
+     * document order. A count mismatch means something was dropped, and that
+     * is reported first because it invalidates every index after it.
+     *
+     * @param  array<string, mixed>  $candidate  as authored
+     * @param  array<string, mixed>  $normalized  the output of SchemaService::normalize()
+     * @return array<string, list<string>>
+     */
+    public function repairsFor(array $candidate, array $normalized): array
+    {
+        $authored = is_array($candidate['sections'] ?? null) ? array_values($candidate['sections']) : [];
+        $result = $normalized['sections'] ?? [];
+
+        if (count($authored) !== count($result)) {
+            return ['sections' => [
+                'Every section must be an object with a fields array. '
+                    .count($authored).' were written and '.count($result).' could be read.',
+            ]];
+        }
+
+        $errors = [];
+
+        foreach ($authored as $index => $section) {
+            $fields = is_array($section) && is_array($section['fields'] ?? null)
+                ? array_values($section['fields'])
+                : [];
+            $normalizedFields = $result[$index]['fields'] ?? [];
+
+            if (count($fields) !== count($normalizedFields)) {
+                $errors["sections.{$index}.fields"][] = 'Every field must be an object. '
+                    .count($fields).' were written and '.count($normalizedFields).' could be read.';
+
+                continue;
+            }
+
+            foreach ($fields as $fieldIndex => $field) {
+                if (! is_array($field)) {
+                    continue;
+                }
+
+                $path = "sections.{$index}.fields.{$fieldIndex}";
+
+                foreach (['key', 'id', 'type'] as $property) {
+                    $written = $field[$property] ?? null;
+
+                    // Absent means "you choose", so only an authored value is held to.
+                    if (! is_string($written) || $written === '') {
+                        continue;
+                    }
+
+                    $read = $normalizedFields[$fieldIndex][$property] ?? null;
+
+                    // ids are compared case-insensitively; normalize() upper-cases them.
+                    $same = $property === 'id'
+                        ? strtoupper($written) === strtoupper((string) $read)
+                        : $written === $read;
+
+                    if (! $same) {
+                        $errors["{$path}.{$property}"][] = "The {$property} [{$written}] is not usable as written "
+                            ."and would become [{$read}]. Change it yourself rather than letting it be rewritten.";
+                    }
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
      * normalize() invents a title and an empty section list, which would turn
      * "the model replied with prose" into a valid but empty form.
      *

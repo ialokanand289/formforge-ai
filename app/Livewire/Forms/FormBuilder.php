@@ -3,6 +3,7 @@
 namespace App\Livewire\Forms;
 
 use App\Enums\FieldType;
+use App\Enums\FormStatus;
 use App\Enums\GenerationStatus;
 use App\Enums\GenerationType;
 use App\Enums\ImportSource;
@@ -160,6 +161,22 @@ class FormBuilder extends Component
     #[Locked]
     public ?string $importMessage = null;
 
+    /**
+     * The raw JSON the user is editing, which is not the schema.
+     *
+     * This is deliberately unlocked, because a textarea has to be able to write
+     * to it. The separation that matters is the other one: $schema is locked
+     * and applyJson() is the only route from this string to it, so nothing
+     * typed here reaches the builder without clearing every gate first.
+     */
+    public string $schemaDraft = '';
+
+    #[Locked]
+    public ?string $jsonError = null;
+
+    #[Locked]
+    public ?string $jsonMessage = null;
+
     public function mount(Form $form, SchemaService $schemaService): void
     {
         $this->authorize('view', $form);
@@ -171,6 +188,65 @@ class FormBuilder extends Component
         $this->paletteFields = $this->buildPalette();
         $this->selectedSectionId = $this->schema['sections'][0]['id'] ?? null;
         $this->loadFieldForm();
+        $this->refreshJsonDraft();
+
+        // Set by FormVersions::rollback() just before it redirects here, so the
+        // outcome of an action taken on another page is reported on this one.
+        $this->saveMessage = session()->pull('builderMessage');
+    }
+
+    /**
+     * The live URL, or null while the form is not published.
+     *
+     * Built from public_token rather than the slug: the token is the only
+     * identifier meant to leave the dashboard, and it carries no hint of the
+     * owner or of how many forms they have.
+     */
+    #[Computed]
+    public function publicUrl(): ?string
+    {
+        return $this->status === FormStatus::Published->value
+            ? route('forms.public', $this->form->public_token)
+            : null;
+    }
+
+    /**
+     * Make the form reachable at its public link.
+     *
+     * Touches the status columns only. The schema is not read, changed, or
+     * versioned, because publishing is a decision about visibility rather than
+     * about content.
+     */
+    public function publish(): void
+    {
+        $this->authorize('publish', $this->form);
+
+        $this->form->forceFill([
+            'status' => FormStatus::Published,
+            'published_at' => now(),
+        ])->save();
+
+        $this->status = $this->form->status->value;
+        $this->saveMessage = 'Form published.';
+        $this->schemaError = null;
+
+        unset($this->publicUrl);
+    }
+
+    public function unpublish(): void
+    {
+        $this->authorize('publish', $this->form);
+
+        $this->form->forceFill([
+            'status' => FormStatus::Draft,
+            'published_at' => null,
+        ])->save();
+
+        $this->status = $this->form->status->value;
+        $this->saveMessage = 'Form unpublished. The public link no longer works.';
+        $this->schemaError = null;
+
+        unset($this->publicUrl);
     }
 
     public function addSection(): void
@@ -375,11 +451,155 @@ class FormBuilder extends Component
         $this->restoreSelection($selectedFieldId, $selectedSectionId);
 
         unset($this->schemaJson, $this->sections, $this->fieldEditor);
+
+        $this->refreshJsonDraft();
     }
 
     public function dismissSchemaError(): void
     {
         $this->schemaError = null;
+    }
+
+    public function dismissJsonError(): void
+    {
+        $this->jsonError = null;
+    }
+
+    /**
+     * Pretty-print the draft without touching the schema.
+     *
+     * Syntax only. A document that parses but is not a usable schema still
+     * formats, because tidying text the user is midway through writing should
+     * not require it to be finished.
+     */
+    public function formatJson(): void
+    {
+        $this->jsonError = null;
+        $this->jsonMessage = null;
+
+        $decoded = json_decode($this->schemaDraft, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->jsonError = 'Invalid JSON. Please fix the JSON syntax and try again.';
+
+            return;
+        }
+
+        $encoded = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        if ($encoded === false) {
+            $this->jsonError = 'That JSON could not be formatted.';
+
+            return;
+        }
+
+        $this->schemaDraft = $encoded;
+    }
+
+    /**
+     * Replace the builder schema with the user's JSON, or change nothing.
+     *
+     * The result is assembled entirely in locals and only assigned once every
+     * gate has passed, so a rejected document cannot leave the builder holding
+     * half of it. That is the whole point of the method: the editor is the one
+     * place where a person can hand the builder an arbitrary schema, and losing
+     * their form to a typo is not an acceptable outcome.
+     *
+     * The order matters. SchemaCandidateGate runs before normalize() because
+     * normalize() repairs the exact mistakes that must be reported: an invented
+     * type becomes text, a duplicate key becomes key_2. repairsFor() then runs
+     * after it to catch the repairs the gate does not cover, such as a key
+     * being slugified or an id being regenerated.
+     */
+    public function applyJson(): void
+    {
+        $this->authorize('update', $this->form);
+
+        $this->jsonError = null;
+        $this->jsonMessage = null;
+
+        $candidate = json_decode($this->schemaDraft, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->jsonError = 'Invalid JSON. Please fix the JSON syntax and try again.';
+
+            return;
+        }
+
+        if (! is_array($candidate) || array_is_list($candidate)) {
+            $this->jsonError = 'The schema must be a JSON object, not an array or a single value.';
+
+            return;
+        }
+
+        $gate = app(SchemaCandidateGate::class);
+
+        // No $stored: unlike an AI edit, someone writing the schema by hand is
+        // entitled to rename a key.
+        $errors = $gate->errorsFor($candidate);
+
+        if ($errors !== []) {
+            $this->jsonError = $this->firstJsonError($errors);
+
+            return;
+        }
+
+        try {
+            $normalized = $this->schemaService()->normalize($candidate);
+        } catch (Throwable) {
+            $this->jsonError = 'That schema could not be read. Please check its structure and try again.';
+
+            return;
+        }
+
+        $errors = $gate->repairsFor($candidate, $normalized);
+
+        if ($errors === []) {
+            $errors = $this->schemaService()->validationErrors($normalized);
+        }
+
+        if ($errors !== []) {
+            $this->jsonError = $this->firstJsonError($errors);
+
+            return;
+        }
+
+        $selectedFieldId = $this->selectedFieldId;
+        $selectedSectionId = $this->selectedSectionId;
+
+        // Nothing above this line has written to the component.
+        $this->schema = $normalized;
+        $this->dirty = true;
+        $this->schemaError = null;
+        $this->saveMessage = null;
+        $this->jsonMessage = 'JSON applied. Save to keep it.';
+
+        $this->restoreSelection($selectedFieldId, $selectedSectionId);
+
+        unset($this->schemaJson, $this->sections, $this->fieldEditor);
+
+        $this->refreshJsonDraft();
+    }
+
+    /**
+     * @param  array<string, list<string>>  $errors
+     */
+    protected function firstJsonError(array $errors): string
+    {
+        return 'That schema was rejected: '
+            .(collect($errors)->flatten()->first() ?? 'it is not a valid form schema.');
+    }
+
+    /**
+     * Point the editor back at the committed schema.
+     *
+     * Called after every mutation so the canvas and the JSON never disagree.
+     * It does overwrite whatever the user had typed, which is the intended
+     * trade: the editor shows the schema, and the schema has just changed.
+     */
+    protected function refreshJsonDraft(): void
+    {
+        $this->schemaDraft = $this->schemaJson();
     }
 
     public function toggleAiPanel(): void
@@ -539,6 +759,8 @@ class FormBuilder extends Component
         $this->loadFieldForm();
 
         unset($this->schemaJson, $this->sections, $this->fieldEditor, $this->aiRunning);
+
+        $this->refreshJsonDraft();
 
         $this->aiMessage = $this->summarizeKeyChanges($before, $this->fieldKeys());
     }
@@ -837,6 +1059,8 @@ class FormBuilder extends Component
         $this->showImport = false;
 
         unset($this->schemaJson, $this->sections, $this->fieldEditor, $this->importRunning);
+
+        $this->refreshJsonDraft();
     }
 
     /**
@@ -1440,6 +1664,8 @@ class FormBuilder extends Component
         }
 
         unset($this->schemaJson, $this->sections, $this->fieldEditor);
+
+        $this->refreshJsonDraft();
     }
 
     /**
