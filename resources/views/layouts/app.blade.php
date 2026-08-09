@@ -32,5 +32,10 @@
                 {{ $slot }}
             </main>
         </div>
+
+        {{-- Loaded explicitly rather than left to auto-injection, because this
+             layout also serves pages with no Livewire component on them, and
+             Alpine has to be present for the navigation either way. --}}
+        @livewireScripts
     </body>
 </html>

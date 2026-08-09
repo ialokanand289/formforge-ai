@@ -16,5 +16,7 @@
         <div class="flex h-full flex-col overflow-hidden">
             {{ $slot }}
         </div>
+
+        @livewireScripts
     </body>
 </html>
